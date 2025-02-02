@@ -1,4 +1,5 @@
-# Excel Übersetzungstool Copyright © 2024 Axel Schmidt
+# Excel Übersetzungstool 
+© 2025 Axel Schmidt
 
 ## Übersicht
 Dieses Tool übersetzt automatisch deutsche Texte in Excel-Dateien ins Englische. Es erkennt alle Spalten, die mit '_DE' enden, und erstellt entsprechende englische Übersetzungen in neuen '_EN' Spalten.
