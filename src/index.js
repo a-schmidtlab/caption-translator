@@ -4,9 +4,9 @@
  * @file    index.js
  * @author  Axel Schmidt
  * @version 1.0.0
- * @date    2024
+ * @date    2025
  * 
- * @copyright Copyright (c) 2024 Axel Schmidt
+ * @copyright Copyright (c) 2025 Axel Schmidt
  * 
  * This work is licensed under the Creative Commons Attribution-NonCommercial 4.0 
  * International License. To view a copy of this license, visit:
@@ -23,7 +23,7 @@
  * - NonCommercial: You may not use the material for commercial purposes.
  * 
  * For more information about the author and usage terms, please visit:
- * https://github.com/yourusername/excel-translator
+ * https://github.com/a-schmidtlab/excel-translator
  */
 
 import pkg from 'xlsx';
@@ -38,73 +38,156 @@ import cliProgress from 'cli-progress';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
-async function translateText(text) {
-    try {
-        const apiUrl = process.env.LIBRETRANSLATE_API_URL || 'http://localhost:5555';
-        const response = await fetch(`${apiUrl}/translate`, {
-            method: 'POST',
-            body: JSON.stringify({
-                q: text,
-                source: 'de',
-                target: 'en',
-                format: 'text'
-            }),
-            headers: { 'Content-Type': 'application/json' }
-        });
+// Configuration
+const BATCH_SIZE = 20; // Number of translations to process in parallel
+const MAX_RETRIES = 3; // Maximum number of retries for failed translations
+const RETRY_DELAY = 1000; // Delay between retries in milliseconds
 
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+// Specific columns to translate
+const COLUMNS_TO_TRANSLATE = [
+    'IPTC_DE_Headline',
+    'IPTC_DE_Beschreibung',
+    'IPTC_DE_Bundesland',
+    'IPTC_DE_Land',
+    'IPTC_DE_Anweisung',
+    'IPTC_DE_User_Keywords',
+    'AI_keywords_DE'
+];
+
+// Columns to explicitly ignore
+const COLUMNS_TO_IGNORE = [
+    'IPTC_DE_Credit',
+    'IPTC_DE_Aufnahmedatum'
+];
+
+function formatTimeRemaining(seconds) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return `${hours}h ${minutes}m`;
+}
+
+async function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function translateBatch(texts) {
+    const apiUrl = process.env.LIBRETRANSLATE_API_URL || 'http://localhost:5555';
+    const uniqueTexts = [...new Set(texts.filter(text => text))]; // Remove duplicates and empty strings
+
+    if (uniqueTexts.length === 0) return new Map();
+
+    for (let retry = 0; retry < MAX_RETRIES; retry++) {
+        try {
+            const response = await fetch(`${apiUrl}/translate`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    q: uniqueTexts,
+                    source: 'de',
+                    target: 'en',
+                    format: 'text'
+                }),
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            // Create a map of original text to translated text
+            const translationMap = new Map();
+            uniqueTexts.forEach((text, index) => {
+                translationMap.set(text, data.translatedText[index]);
+            });
+            return translationMap;
+        } catch (error) {
+            if (retry === MAX_RETRIES - 1) {
+                console.error(`Translation batch failed after ${MAX_RETRIES} retries:`, error.message);
+                return new Map(uniqueTexts.map(text => [text, `[TRANSLATION ERROR: ${error.message}]`]));
+            }
+            console.log(`Retry ${retry + 1}/${MAX_RETRIES} after error:`, error.message);
+            await sleep(RETRY_DELAY * (retry + 1)); // Exponential backoff
         }
-
-        const data = await response.json();
-        return data.translatedText;
-    } catch (error) {
-        console.error(`Translation failed for text "${text}":`, error.message);
-        return `[TRANSLATION ERROR: ${error.message}]`;
     }
 }
 
-async function processExcelFile(inputPath) {
+async function processExcelFile(inputPath, testMode = false) {
     try {
         console.log('Reading Excel file...');
         // Read the workbook
         const workbook = readFile(inputPath);
         const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-        const jsonData = utils.sheet_to_json(worksheet);
+        let jsonData = utils.sheet_to_json(worksheet);
 
         if (jsonData.length === 0) {
             throw new Error('Excel file is empty');
         }
 
-        // Find columns ending with _DE
-        const headers = Object.keys(jsonData[0]);
-        const germanColumns = headers.filter(header => header.endsWith('_DE'));
-
-        if (germanColumns.length === 0) {
-            throw new Error('No columns ending with _DE found');
+        // If in test mode, only process first 10 rows
+        if (testMode) {
+            console.log('TEST MODE: Processing only first 10 rows');
+            jsonData = jsonData.slice(0, 10);
         }
 
-        console.log(`Found ${germanColumns.length} German columns to translate`);
-        console.log('German columns:', germanColumns);
+        // Find columns to translate
+        const headers = Object.keys(jsonData[0]);
+        const germanColumns = headers.filter(header => 
+            COLUMNS_TO_TRANSLATE.includes(header) || 
+            (header.endsWith('_DE') && !COLUMNS_TO_IGNORE.includes(header))
+        );
 
-        // Create progress bar
-        const progressBar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
+        if (germanColumns.length === 0) {
+            throw new Error('No matching German columns found');
+        }
+
+        console.log(`Found ${germanColumns.length} German columns to translate:`);
+        console.log(germanColumns);
+
+        // Create progress bar with custom format
+        const progressBar = new cliProgress.SingleBar({
+            format: ' {bar} {percentage}% | Time left: {eta} | {value}/{total}',
+            etaBuffer: 100
+        }, cliProgress.Presets.shades_classic);
+        
         const totalTranslations = jsonData.length * germanColumns.length;
         progressBar.start(totalTranslations, 0);
         let progress = 0;
 
-        // Process each row
-        for (const row of jsonData) {
-            for (const germanCol of germanColumns) {
-                const englishCol = germanCol.replace('_DE', '_EN');
-                if (row[germanCol]) {
-                    row[englishCol] = await translateText(row[germanCol]);
-                } else {
-                    row[englishCol] = '';
+        // Process in batches
+        for (let i = 0; i < jsonData.length; i += BATCH_SIZE) {
+            const batch = jsonData.slice(i, i + BATCH_SIZE);
+            const batchTexts = [];
+            const batchMappings = [];
+
+            // Collect all texts from this batch
+            for (const row of batch) {
+                for (const germanCol of germanColumns) {
+                    if (row[germanCol]) {
+                        batchTexts.push(row[germanCol]);
+                        batchMappings.push({ row, germanCol });
+                    } else {
+                        progress++;
+                        progressBar.update(progress);
+                    }
                 }
-                progress++;
-                progressBar.update(progress);
             }
+
+            // Translate the batch
+            const translationMap = await translateBatch(batchTexts);
+
+            // Apply translations
+            for (let j = 0; j < batchTexts.length; j++) {
+                const { row, germanCol } = batchMappings[j];
+                const englishCol = germanCol.replace('_DE', '_EN');
+                row[englishCol] = translationMap.get(row[germanCol]) || '';
+                progress++;
+                progressBar.update(progress, {
+                    eta: formatTimeRemaining(progressBar.eta)
+                });
+            }
+
+            // Small delay to prevent overwhelming the API
+            await sleep(100);
         }
 
         progressBar.stop();
@@ -116,9 +199,10 @@ async function processExcelFile(inputPath) {
 
         // Generate output filename
         const parsedPath = path.parse(inputPath);
+        const suffix = testMode ? '_test_translated' : '_translated';
         const outputPath = path.join(
             parsedPath.dir,
-            `${parsedPath.name}_translated${parsedPath.ext}`
+            `${parsedPath.name}${suffix}${parsedPath.ext}`
         );
 
         // Write the file
@@ -133,10 +217,14 @@ async function processExcelFile(inputPath) {
 
 // Get input file from command line arguments
 const inputFile = process.argv[2];
+const testMode = process.argv.includes('--test');
+
 if (!inputFile) {
     console.error('Please provide an input Excel file path');
-    console.log('Usage: npm start <excel-file-path>');
+    console.log('Usage: npm start <excel-file-path> [--test]');
+    console.log('Options:');
+    console.log('  --test    Process only first 10 rows (test mode)');
     process.exit(1);
 }
 
-processExcelFile(inputFile); 
+processExcelFile(inputFile, testMode); 
