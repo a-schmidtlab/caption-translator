@@ -60,7 +60,8 @@ const DEFAULT_CONFIG = {
     CHUNK_SIZE: 1000,            // Number of rows to process in each chunk
     MAX_TEXT_LENGTH: 5000,       // Maximum length for a single text
     CHECKPOINT_INTERVAL: 100,    // Save progress every N successful translations
-    MAX_MEMORY_USAGE: 0.8        // Maximum memory usage (80% of available)
+    MAX_MEMORY_USAGE: 0.8,       // Maximum memory usage (80% of available)
+    SAVE_INTERVAL: 1000          // Save intermediate results every N rows
 };
 
 // Adjust configuration based on system resources
@@ -264,6 +265,32 @@ async function translateBatch(texts) {
 }
 
 /**
+ * Saves current progress to Excel file
+ * @param {Array} jsonData - Data to save
+ * @param {string} basePath - Base path for the output file
+ * @param {boolean} isFinal - Whether this is the final save
+ */
+async function saveToExcel(jsonData, basePath, isFinal = false) {
+    const newWorksheet = utils.json_to_sheet(jsonData);
+    const newWorkbook = utils.book_new();
+    utils.book_append_sheet(newWorkbook, newWorksheet, 'Translated');
+
+    const parsedPath = path.parse(basePath);
+    const suffix = isFinal ? '_translated_FINAL' : '_translated';
+    const outputPath = path.join(
+        parsedPath.dir,
+        `${parsedPath.name}${suffix}${parsedPath.ext}`
+    );
+
+    writeFile(newWorkbook, outputPath);
+    if (isFinal) {
+        console.log(`\nFinal output saved to: ${outputPath}`);
+    } else {
+        console.log(`\nIntermediate result saved to: ${outputPath}`);
+    }
+}
+
+/**
  * Main function to process Excel file
  * @param {string} inputPath - Path to input Excel file
  * @param {boolean} testMode - Whether to run in test mode
@@ -343,6 +370,7 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
         const textGroups = groupTextsByLength(uniqueTexts);
 
         // Process groups in parallel batches
+        let processedRows = 0;
         for (let i = 0; i < textGroups.length; i += config.PARALLEL_BATCHES) {
             const batchPromises = [];
             
@@ -381,11 +409,29 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
                 });
             }
 
+            // Apply translations to the current batch and save intermediate results
+            const currentProcessedRows = Math.floor((progress / textGroups.length) * jsonData.length);
+            if (currentProcessedRows - processedRows >= config.SAVE_INTERVAL) {
+                console.log('\nApplying translations to current batch...');
+                const partialData = jsonData.map(row => {
+                    const newRow = { ...row };
+                    for (const germanCol of germanColumns) {
+                        if (row[germanCol]) {
+                            const englishCol = germanCol.replace('_DE', '_EN');
+                            newRow[englishCol] = uniqueTextsMap.get(row[germanCol]) || '';
+                        }
+                    }
+                    return newRow;
+                });
+                await saveToExcel(partialData, inputPath, false);
+                processedRows = currentProcessedRows;
+            }
+
             await sleep(config.BATCH_DELAY);
         }
 
-        // Apply translations from the map to all rows
-        console.log('\nApplying translations to Excel file...');
+        // Apply final translations to all rows
+        console.log('\nApplying final translations to Excel file...');
         for (const row of jsonData) {
             for (const germanCol of germanColumns) {
                 if (row[germanCol]) {
@@ -406,22 +452,8 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
             // Ignore error if file doesn't exist
         }
 
-        // Create new workbook with translated content
-        const newWorksheet = utils.json_to_sheet(jsonData);
-        const newWorkbook = utils.book_new();
-        utils.book_append_sheet(newWorkbook, newWorksheet, 'Translated');
-
-        // Generate output filename
-        const parsedPath = path.parse(inputPath);
-        const suffix = testMode ? '_test_translated' : '_translated';
-        const outputPath = path.join(
-            parsedPath.dir,
-            `${parsedPath.name}${suffix}${parsedPath.ext}`
-        );
-
-        // Write the file
-        writeFile(newWorkbook, outputPath);
-        console.log(`Output saved to: ${outputPath}`);
+        // Save final result
+        await saveToExcel(jsonData, inputPath, true);
 
     } catch (error) {
         console.error('Error processing Excel file:', error.message);
