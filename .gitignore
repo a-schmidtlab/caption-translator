@@ -1,0 +1,5 @@
+node_modules/
+.env
+*.log
+.DS_Store 
+captions_tmn2westend61_1_caption_übersetzt_mgo.xlsx
