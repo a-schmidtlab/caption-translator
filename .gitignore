@@ -1,5 +1,9 @@
 node_modules/
 .env
 *.log
-.DS_Store 
-captions_tmn2westend61_1_caption_übersetzt_mgo.xlsx
+.DS_Store
+*_translated.xlsx
+*_translated_FINAL.xlsx
+*.xlsx.checkpoint
+# Ignore all Excel files over 100MB
+*_übersetzt_*.xlsx
