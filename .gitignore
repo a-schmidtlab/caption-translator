@@ -1,6 +1,11 @@
 node_modules/
 *.log
 .env
-*.xlsx
-.*.checkpoint.json
 .DS_Store
+*.xlsx
+*_translated.xlsx
+*_translated_FINAL.xlsx
+*.xlsx.checkpoint
+.*.checkpoint.json
+# Ignore all Excel files over 100MB
+*_übersetzt_*.xlsx
