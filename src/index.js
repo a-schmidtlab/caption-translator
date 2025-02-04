@@ -369,14 +369,17 @@ async function translateBatch(texts, batchIndex) {
     for (let retry = 0; retry < config.MAX_RETRIES; retry++) {
         try {
             // Split texts into smaller sub-batches for better parallelization
-            const subBatchSize = Math.ceil(uniqueTexts.length / 2);
+            const subBatchSize = Math.max(1, Math.ceil(uniqueTexts.length / config.PARALLEL_BATCHES));
             const subBatches = [];
             for (let i = 0; i < uniqueTexts.length; i += subBatchSize) {
                 subBatches.push(uniqueTexts.slice(i, i + subBatchSize));
             }
 
-            // Translate sub-batches in parallel
-            const subBatchPromises = subBatches.map(async (subBatch) => {
+            // Create parallel promises for each sub-batch
+            const subBatchPromises = subBatches.map(async (subBatch, subIndex) => {
+                // Add a small delay between sub-batches to prevent overwhelming the API
+                await sleep(subIndex * 50);
+                
                 const response = await fetch(`${apiUrl}/translate`, {
                     method: 'POST',
                     body: JSON.stringify({
@@ -395,7 +398,8 @@ async function translateBatch(texts, batchIndex) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
 
-                return response.json();
+                const result = await response.json();
+                return { texts: subBatch, translations: result.translatedText };
             });
 
             // Wait for all sub-batches to complete
@@ -403,12 +407,9 @@ async function translateBatch(texts, batchIndex) {
             
             // Merge results
             const translationMap = new Map();
-            let translatedIndex = 0;
-            
             results.forEach(result => {
-                result.translatedText.forEach((translation, index) => {
-                    translationMap.set(uniqueTexts[translatedIndex], translation);
-                    translatedIndex++;
+                result.texts.forEach((text, index) => {
+                    translationMap.set(text, result.translations[index]);
                 });
             });
             
