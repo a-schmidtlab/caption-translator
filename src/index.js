@@ -52,15 +52,15 @@ dotenv.config({ path: path.join(__dirname, '../.env') });
  * These values are optimized for a 12-core machine
  */
 const DEFAULT_CONFIG = {
-    BATCH_SIZE: 75,               // Optimized for 12-core CPU
-    PARALLEL_BATCHES: 10,         // Use most cores (leaving 2 for system)
+    BATCH_SIZE: 25,               // Smaller batches for more frequent updates
+    PARALLEL_BATCHES: 20,         // Increased parallel processing
     MAX_RETRIES: 3,              // Maximum retry attempts for failed requests
     RETRY_DELAY: 1000,           // Base delay between retries (ms)
-    BATCH_DELAY: 5,              // Minimal delay between batches for 12-core
-    CHUNK_SIZE: 750,             // Optimized chunk size for memory efficiency
+    BATCH_DELAY: 0,              // No delay between batches for maximum throughput
+    CHUNK_SIZE: 500,             // Optimized chunk size for memory efficiency
     MAX_TEXT_LENGTH: 5000,       // Maximum length for a single text
     CHECKPOINT_INTERVAL: 50,     // More frequent checkpoints
-    MAX_MEMORY_USAGE: 0.8,       // Maximum memory usage (80% of available)
+    MAX_MEMORY_USAGE: 0.9,       // Increased maximum memory usage (90% of available)
     SAVE_INTERVAL: 500           // More frequent saves for safety
 };
 
@@ -105,35 +105,27 @@ function calculateOptimalConfig() {
     
     // Optimize specifically for 12-core system
     if (cpuCount === 12) {
-        config.PARALLEL_BATCHES = 8;     // Use 8 cores for heavy translation work
-        config.BATCH_SIZE = 50;          // Smaller batches for more frequent updates
+        config.PARALLEL_BATCHES = 20;    // Increased parallel processing
+        config.BATCH_SIZE = 25;          // Smaller batches for more frequent updates
         config.CHUNK_SIZE = 500;         // Smaller chunks for better distribution
         config.BATCH_DELAY = 0;          // No delay between batches for maximum throughput
-        config.CHECKPOINT_INTERVAL = 200; // Less frequent checkpoints to reduce I/O
-        config.SAVE_INTERVAL = 2000;     // Less frequent saves to reduce I/O
+        config.CHECKPOINT_INTERVAL = 100; // Balanced checkpoint frequency
+        config.SAVE_INTERVAL = 1000;     // Balanced save frequency
     } else {
         // Fallback for other systems
-        config.PARALLEL_BATCHES = Math.max(Math.floor(cpuCount * 0.8), 2);
-        config.BATCH_SIZE = Math.floor(100 / (config.PARALLEL_BATCHES / 4));
+        config.PARALLEL_BATCHES = Math.max(Math.floor(cpuCount * 1.5), 4);
+        config.BATCH_SIZE = Math.floor(75 / (config.PARALLEL_BATCHES / 8));
         config.CHUNK_SIZE = config.BATCH_SIZE * 10;
     }
     
     // Memory-based adjustments
     const memoryRatio = freeMemory / totalMemory;
-    if (memoryRatio < 0.3) {
-        config.BATCH_SIZE = Math.floor(config.BATCH_SIZE * 0.6);
-        config.CHUNK_SIZE = Math.floor(config.CHUNK_SIZE * 0.6);
+    if (memoryRatio < 0.2) {
+        config.BATCH_SIZE = Math.floor(config.BATCH_SIZE * 0.8);
+        config.CHUNK_SIZE = Math.floor(config.CHUNK_SIZE * 0.8);
     }
     
-    console.log(`Optimized configuration for 12-core system:
-    - CPU Cores: ${cpuCount}
-    - Parallel Batches: ${config.PARALLEL_BATCHES}
-    - Batch Size: ${config.BATCH_SIZE}
-    - Chunk Size: ${config.CHUNK_SIZE}
-    - Batch Delay: ${config.BATCH_DELAY}ms
-    - Memory Ratio: ${(memoryRatio * 100).toFixed(1)}%
-    - Checkpoint Interval: ${config.CHECKPOINT_INTERVAL}
-    - Save Interval: ${config.SAVE_INTERVAL}`);
+    console.log(`[Config] CPU:${cpuCount} | Batches:${config.PARALLEL_BATCHES} | Size:${config.BATCH_SIZE} | Mem:${(memoryRatio * 100).toFixed(1)}%`);
     
     return config;
 }
@@ -146,7 +138,7 @@ function calculateOptimalConfig() {
 function formatTimeRemaining(seconds) {
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
-    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+    return `${hours}h${minutes}m`;
 }
 
 /**
@@ -163,10 +155,10 @@ function formatProgress(current, total, startTime) {
     const etaSeconds = remainingItems / rate;
     
     return {
-        lines: `${current.toString().padStart(5, ' ')}/${total} lines`,
-        timeLeft: formatTimeRemaining(etaSeconds),
-        percent: Math.floor((current / total) * 100),
-        rate: `${Math.floor(rate)} items/sec`
+        progress: `${Math.floor((current / total) * 100)}%`,
+        count: `${current}/${total}`,
+        speed: `${Math.floor(rate)}/s`,
+        eta: formatTimeRemaining(etaSeconds)
     };
 }
 
@@ -607,19 +599,36 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
 
         console.log(`\nContinuing translation for remaining ${remainingTexts} texts...\n`);
 
-        const progressBar = new cliProgress.SingleBar({
-            format: 'Progress |{bar}| {percentage}% | {lines} | {rate} | Time remaining: {timeLeft}',
-            barCompleteChar: '█',
-            barIncompleteChar: '░',
-            hideCursor: true,
-            clearOnComplete: false
-        });
-
-        progressBar.start(100, 0);
+        // Initialize progress tracking
         let progress = 0;
+        let progressBar;
+
+        // Only create progress bar if running in a terminal
+        if (process.stdout.isTTY) {
+            progressBar = new cliProgress.SingleBar({
+                format: 'Translation Progress |{bar}| {percentage}% | {completed}/{total} texts | Rate: {rate} | ETA: {eta} | CPU: {cpu}%',
+                barCompleteChar: '█',
+                barIncompleteChar: '░',
+                hideCursor: true,
+                clearOnComplete: false,
+                stopOnComplete: true,
+                forceRedraw: true
+            });
+
+            progressBar.start(totalTexts, completedTranslations, {
+                completed: completedTranslations,
+                total: totalTexts,
+                rate: "0 texts/s",
+                eta: "--:--",
+                cpu: "0.0"
+            });
+        } else {
+            console.log('Running in non-terminal mode - detailed progress will be logged to file');
+        }
 
         // Group texts by length for optimal processing
         const textGroups = groupTextsByLength(uniqueTexts);
+        console.log(`Organized into ${textGroups.length} batch groups for processing\n`);
 
         // Process groups in parallel batches
         let processedRows = 0;
@@ -637,6 +646,11 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
         // Process batch groups
         for (let groupIndex = 0; groupIndex < batchGroups.length; groupIndex++) {
             const group = batchGroups[groupIndex];
+            
+            // Get current CPU usage
+            const cpuUsage = process.cpuUsage();
+            const cpuPercent = ((cpuUsage.user + cpuUsage.system) / 1000000).toFixed(1);
+            
             const batchPromises = group.map((batch, index) => 
                 translateBatch(batch, groupIndex * config.PARALLEL_BATCHES + index)
             );
@@ -650,7 +664,7 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
                     translationCache.set(original, translated);
                 }
             });
-
+            
             // Update progress
             progress = Math.min((groupIndex + 1) * config.PARALLEL_BATCHES, textGroups.length);
             const progressInfo = formatProgress(
@@ -658,7 +672,28 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
                 jsonData.length, 
                 startTime
             );
-            progressBar.update(progressInfo.percent, progressInfo);
+
+            const currentCompleted = completedTranslations + progress;
+            
+            // Update progress based on terminal mode
+            if (progressBar) {
+                progressBar.update(currentCompleted, {
+                    completed: currentCompleted,
+                    total: totalTexts,
+                    rate: progressInfo.speed,
+                    eta: progressInfo.eta,
+                    cpu: cpuPercent
+                });
+            } else if (progress % Math.ceil(textGroups.length / 20) === 0) {
+                // Log progress to file in non-terminal mode
+                console.log(`\nProgress Update [${new Date().toISOString()}]:
+- Completed: ${currentCompleted}/${totalTexts} texts
+- Progress: ${progressInfo.progress}
+- Translation Rate: ${progressInfo.speed}
+- Time Remaining: ${progressInfo.eta}
+- CPU Usage: ${cpuPercent}%
+- Active Batch Group: ${groupIndex + 1}/${batchGroups.length}\n`);
+            }
 
             // Save checkpoint periodically
             if (progress % config.CHECKPOINT_INTERVAL === 0) {
@@ -702,7 +737,11 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
             }
         }
 
-        progressBar.stop();
+        // Stop and clean up the progress bar
+        if (progressBar) {
+            progressBar.stop();
+        }
+
         const totalTime = formatTimeRemaining((Date.now() - startTime) / 1000);
         console.log(`\nTranslation completed in ${totalTime}`);
 
