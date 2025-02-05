@@ -606,9 +606,10 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
         // Only create progress bar if running in a terminal
         if (process.stdout.isTTY) {
             progressBar = new cliProgress.SingleBar({
-                format: 'Translation Progress |{bar}| {percentage}% | {completed}/{total} texts | Rate: {rate} | ETA: {eta} | CPU: {cpu}%',
+                format: '[{bar}] {percentage}% | {completed}/{total} | {speed}/s | {timeLeft}',
                 barCompleteChar: '█',
                 barIncompleteChar: '░',
+                barsize: 20,
                 hideCursor: true,
                 clearOnComplete: false,
                 stopOnComplete: true,
@@ -618,9 +619,8 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
             progressBar.start(totalTexts, completedTranslations, {
                 completed: completedTranslations,
                 total: totalTexts,
-                rate: "0 texts/s",
-                eta: "--:--",
-                cpu: "0.0"
+                speed: "0",
+                timeLeft: "0h 0m"
             });
         } else {
             console.log('Running in non-terminal mode - detailed progress will be logged to file');
@@ -677,12 +677,14 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
             
             // Update progress based on terminal mode
             if (progressBar) {
+                const timeLeft = progressInfo.eta.split('h');
+                const hours = timeLeft[0];
+                const minutes = timeLeft[1].replace('m', '');
                 progressBar.update(currentCompleted, {
                     completed: currentCompleted,
                     total: totalTexts,
-                    rate: progressInfo.speed,
-                    eta: progressInfo.eta,
-                    cpu: cpuPercent
+                    speed: progressInfo.speed.replace(' texts/s', ''),
+                    timeLeft: `${hours}h ${minutes}m`
                 });
             } else if (progress % Math.ceil(textGroups.length / 20) === 0) {
                 // Log progress to file in non-terminal mode
