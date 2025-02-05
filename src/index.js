@@ -52,16 +52,16 @@ dotenv.config({ path: path.join(__dirname, '../.env') });
  * These values are optimized for a 12-core machine
  */
 const DEFAULT_CONFIG = {
-    BATCH_SIZE: 25,               // Smaller batches for more frequent updates
-    PARALLEL_BATCHES: 20,         // Increased parallel processing
+    BATCH_SIZE: 10,               // Smaller batches for more frequent updates
+    PARALLEL_BATCHES: 50,         // Much more aggressive parallel processing
     MAX_RETRIES: 3,              // Maximum retry attempts for failed requests
-    RETRY_DELAY: 1000,           // Base delay between retries (ms)
+    RETRY_DELAY: 500,            // Reduced delay between retries
     BATCH_DELAY: 0,              // No delay between batches for maximum throughput
-    CHUNK_SIZE: 500,             // Optimized chunk size for memory efficiency
+    CHUNK_SIZE: 200,             // Smaller chunks for better distribution
     MAX_TEXT_LENGTH: 5000,       // Maximum length for a single text
-    CHECKPOINT_INTERVAL: 50,     // More frequent checkpoints
-    MAX_MEMORY_USAGE: 0.9,       // Increased maximum memory usage (90% of available)
-    SAVE_INTERVAL: 500           // More frequent saves for safety
+    CHECKPOINT_INTERVAL: 100,    // Less frequent checkpoints to reduce I/O
+    MAX_MEMORY_USAGE: 0.95,      // Higher memory usage for better performance
+    SAVE_INTERVAL: 1000          // Less frequent saves to reduce I/O overhead
 };
 
 // Adjust configuration based on system resources
@@ -92,7 +92,6 @@ const COLUMNS_TO_IGNORE = [
 
 /**
  * Calculates optimal configuration based on system resources
- * Adjusts batch sizes and concurrency based on available memory and CPU
  * @returns {Object} Optimized configuration object
  */
 function calculateOptimalConfig() {
@@ -105,24 +104,24 @@ function calculateOptimalConfig() {
     
     // Optimize specifically for 12-core system
     if (cpuCount === 12) {
-        config.PARALLEL_BATCHES = 20;    // Increased parallel processing
-        config.BATCH_SIZE = 25;          // Smaller batches for more frequent updates
-        config.CHUNK_SIZE = 500;         // Smaller chunks for better distribution
-        config.BATCH_DELAY = 0;          // No delay between batches for maximum throughput
-        config.CHECKPOINT_INTERVAL = 100; // Balanced checkpoint frequency
-        config.SAVE_INTERVAL = 1000;     // Balanced save frequency
+        config.PARALLEL_BATCHES = 50;     // Much more aggressive parallel processing
+        config.BATCH_SIZE = 10;           // Smaller batches for better distribution
+        config.CHUNK_SIZE = 200;          // Smaller chunks for more parallelism
+        config.BATCH_DELAY = 0;           // No delay for maximum throughput
+        config.CHECKPOINT_INTERVAL = 200;  // Reduced I/O operations
+        config.SAVE_INTERVAL = 2000;      // Reduced I/O operations
     } else {
         // Fallback for other systems
-        config.PARALLEL_BATCHES = Math.max(Math.floor(cpuCount * 1.5), 4);
-        config.BATCH_SIZE = Math.floor(75 / (config.PARALLEL_BATCHES / 8));
-        config.CHUNK_SIZE = config.BATCH_SIZE * 10;
+        config.PARALLEL_BATCHES = Math.max(Math.floor(cpuCount * 4), 8);
+        config.BATCH_SIZE = Math.floor(50 / (config.PARALLEL_BATCHES / 16));
+        config.CHUNK_SIZE = config.BATCH_SIZE * 8;
     }
     
     // Memory-based adjustments
     const memoryRatio = freeMemory / totalMemory;
-    if (memoryRatio < 0.2) {
-        config.BATCH_SIZE = Math.floor(config.BATCH_SIZE * 0.8);
-        config.CHUNK_SIZE = Math.floor(config.CHUNK_SIZE * 0.8);
+    if (memoryRatio > 0.4) {  // If we have plenty of memory, be more aggressive
+        config.PARALLEL_BATCHES = Math.floor(config.PARALLEL_BATCHES * 1.5);
+        config.CHUNK_SIZE = Math.floor(config.CHUNK_SIZE * 1.3);
     }
     
     console.log(`[Config] CPU:${cpuCount} | Batches:${config.PARALLEL_BATCHES} | Size:${config.BATCH_SIZE} | Mem:${(memoryRatio * 100).toFixed(1)}%`);
@@ -360,8 +359,8 @@ async function translateBatch(texts, batchIndex) {
 
     for (let retry = 0; retry < config.MAX_RETRIES; retry++) {
         try {
-            // Split texts into smaller sub-batches for better parallelization
-            const subBatchSize = Math.max(1, Math.ceil(uniqueTexts.length / config.PARALLEL_BATCHES));
+            // Split texts into even smaller sub-batches for better parallelization
+            const subBatchSize = Math.max(1, Math.ceil(uniqueTexts.length / 5));  // Split into 5 sub-batches
             const subBatches = [];
             for (let i = 0; i < uniqueTexts.length; i += subBatchSize) {
                 subBatches.push(uniqueTexts.slice(i, i + subBatchSize));
@@ -369,8 +368,8 @@ async function translateBatch(texts, batchIndex) {
 
             // Create parallel promises for each sub-batch
             const subBatchPromises = subBatches.map(async (subBatch, subIndex) => {
-                // Add a small delay between sub-batches to prevent overwhelming the API
-                await sleep(subIndex * 50);
+                // Minimal delay between sub-batches
+                if (subIndex > 0) await sleep(10);
                 
                 const response = await fetch(`${apiUrl}/translate`, {
                     method: 'POST',
@@ -412,7 +411,7 @@ async function translateBatch(texts, batchIndex) {
                 return new Map(uniqueTexts.map(text => [text, `[TRANSLATION ERROR: ${error.message}]`]));
             }
             console.log(`Batch ${batchIndex}: Retry ${retry + 1}/${config.MAX_RETRIES} after error:`, error.message);
-            await sleep(config.RETRY_DELAY * Math.pow(2, retry));
+            await sleep(config.RETRY_DELAY * Math.pow(1.5, retry));
         }
     }
 }
