@@ -1,11 +1,31 @@
+# Node.js
 node_modules/
-*.log
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Environment
 .env
-.DS_Store
-*.xlsx
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Project specific
+logs/
+output/
+checkpoints/
+*.checkpoint
+*.checkpoint.json
+*.checkpoint.tmp
+*.log
 *_translated.xlsx
 *_translated_FINAL.xlsx
-*.xlsx.checkpoint
-.*.checkpoint.json
-# Ignore all Excel files over 100MB
-*_übersetzt_*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db

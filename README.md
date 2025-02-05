@@ -1,14 +1,15 @@
-# Caption Translator
+# Excel Translation Tool
 
-A Node.js tool for translating large Excel files containing captions from German to English using LibreTranslate.
+A high-performance Node.js tool for translating Excel files from German to English using LibreTranslate.
 
 ## Features
 
-- Batch translation of Excel files
-- Checkpoint system for resuming interrupted translations
-- Progress tracking with intermediate saves
-- Handles large files efficiently
-- Docker-based translation service
+- Parallel processing with optimized batch translation
+- Automatic CPU and memory optimization
+- Progress tracking and checkpointing
+- Resume capability after interruption
+- Memory-efficient processing of large files
+- Intelligent error handling and retries
 
 ## Prerequisites
 
@@ -20,8 +21,8 @@ A Node.js tool for translating large Excel files containing captions from German
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/a-schmidtlab/caption-translator.git
-cd caption-translator
+git clone https://github.com/yourusername/excel-translator.git
+cd excel-translator
 ```
 
 2. Install dependencies:
@@ -29,22 +30,123 @@ cd caption-translator
 npm install
 ```
 
-3. Start the LibreTranslate service:
+3. Set up LibreTranslate:
 ```bash
 docker run -d -p 5555:5000 --name libretranslate -e LT_LOAD_ONLY=de,en libretranslate/libretranslate
 ```
 
 ## Usage
 
-Run the translation tool:
 ```bash
-node src/index.js "path/to/your/input.xlsx"
+node --expose-gc src/index.js <excel-file> [--test] [--dry-run]
 ```
 
-The tool will:
-- Create checkpoints every 1000 rows
-- Save intermediate results with "_translated.xlsx" suffix
-- Create final output with "_translated_FINAL.xlsx" suffix
+Options:
+- `--test`: Process only first 10 rows (test mode)
+- `--dry-run`: Estimate processing time without translating
+- `--expose-gc`: Enable manual garbage collection (recommended)
+
+## Parallelization Strategy
+
+The tool employs a sophisticated multi-level parallelization strategy to maximize performance while maintaining stability:
+
+### 1. Batch Processing
+- Texts are grouped into batches based on length
+- Default batch size is optimized based on CPU cores
+- Adaptive batch sizing prevents memory overflow
+- Configurable via `BATCH_SIZE` setting
+
+### 2. Parallel Execution
+- Multiple batches are processed concurrently
+- Number of parallel batches scales with CPU cores
+- Default parallel batches: 20 for 12-core systems
+- Configurable via `PARALLEL_BATCHES` setting
+
+### 3. Sub-batch Processing
+- Each batch is split into smaller sub-batches
+- Sub-batches are processed in parallel with staggered starts
+- Prevents API overload while maintaining throughput
+- 3 sub-batches per batch by default
+
+### 4. Connection Pooling
+- HTTP connection pooling for efficient API usage
+- Keeps connections alive for better performance
+- Limited to 10 concurrent sockets
+- Configurable timeout settings
+
+### 5. Memory Management
+- Regular garbage collection
+- Memory usage monitoring
+- Automatic cleanup of completed batches
+- Configurable memory thresholds
+
+### 6. Error Handling
+- Exponential backoff for retries
+- Individual batch recovery
+- Timeout protection
+- Checkpoint system for progress preservation
+
+## Performance Optimization
+
+The tool automatically optimizes its settings based on your system:
+
+### CPU Optimization
+- Detects available CPU cores
+- Adjusts parallel processing accordingly
+- Special optimization for 12-core systems
+- Dynamic adjustment based on system load
+
+### Memory Optimization
+- Monitors available system memory
+- Adjusts batch sizes based on memory
+- Automatic garbage collection
+- Memory-efficient data structures
+
+### I/O Optimization
+- Streaming file processing
+- Efficient checkpoint system
+- Batched file writes
+- Progress persistence
+
+## Project Structure
+
+```
+excel-translator/
+├── src/
+│   ├── index.js        # Main application file
+│   ├── config.js       # Configuration and settings
+│   ├── translator.js   # Translation service
+│   ├── checkpoint.js   # Progress management
+│   ├── excel.js        # Excel file handling
+│   └── utils.js        # Utility functions
+├── logs/               # Log files
+├── output/             # Translated files
+├── checkpoints/        # Progress checkpoints
+├── package.json
+└── README.md
+```
+
+## Configuration
+
+The tool automatically configures itself based on your system resources. Key configuration options in `src/config.js`:
+
+```javascript
+{
+    BATCH_SIZE: 3,                // Texts per batch
+    PARALLEL_BATCHES: 20,         // Concurrent batches
+    MAX_RETRIES: 5,              // Retry attempts
+    RETRY_DELAY: 1000,           // Ms between retries
+    BATCH_DELAY: 500,            // Ms between batches
+    CHUNK_SIZE: 50,              // Texts per chunk
+    MAX_TEXT_LENGTH: 5000,       // Max text length
+    CHECKPOINT_INTERVAL: 100,    // Save frequency
+    SAVE_INTERVAL: 1000          // Excel save frequency
+}
+```
+
+## License
+
+This work is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License.
 
 ## Handling Large Excel Files
 
