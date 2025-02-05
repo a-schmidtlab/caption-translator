@@ -603,28 +603,25 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
         let progress = 0;
         let progressBar;
 
-        // Only create progress bar if running in a terminal
-        if (process.stdout.isTTY) {
-            progressBar = new cliProgress.SingleBar({
-                format: '[{bar}] {percentage}% | {completed}/{total} | {speed}/s | {timeLeft}',
-                barCompleteChar: '█',
-                barIncompleteChar: '░',
-                barsize: 20,
-                hideCursor: true,
-                clearOnComplete: false,
-                stopOnComplete: true,
-                forceRedraw: true
-            });
+        // Create progress bar regardless of terminal mode
+        progressBar = new cliProgress.SingleBar({
+            format: '[{bar}] {percentage}% | {completed}/{total} | {speed}/s | {timeLeft}',
+            barCompleteChar: '█',
+            barIncompleteChar: '░',
+            barsize: 20,
+            hideCursor: true,
+            clearOnComplete: false,
+            stopOnComplete: true,
+            forceRedraw: true,
+            stream: process.stdout // Force output to stdout
+        });
 
-            progressBar.start(totalTexts, completedTranslations, {
-                completed: completedTranslations,
-                total: totalTexts,
-                speed: "0",
-                timeLeft: "0h 0m"
-            });
-        } else {
-            console.log('Running in non-terminal mode - detailed progress will be logged to file');
-        }
+        progressBar.start(totalTexts, completedTranslations, {
+            completed: completedTranslations,
+            total: totalTexts,
+            speed: "0",
+            timeLeft: "0h 0m"
+        });
 
         // Group texts by length for optimal processing
         const textGroups = groupTextsByLength(uniqueTexts);
@@ -686,15 +683,8 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
                     speed: progressInfo.speed.replace(' texts/s', ''),
                     timeLeft: `${hours}h ${minutes}m`
                 });
-            } else if (progress % Math.ceil(textGroups.length / 20) === 0) {
-                // Log progress to file in non-terminal mode
-                console.log(`\nProgress Update [${new Date().toISOString()}]:
-- Completed: ${currentCompleted}/${totalTexts} texts
-- Progress: ${progressInfo.progress}
-- Translation Rate: ${progressInfo.speed}
-- Time Remaining: ${progressInfo.eta}
-- CPU Usage: ${cpuPercent}%
-- Active Batch Group: ${groupIndex + 1}/${batchGroups.length}\n`);
+                // Force progress to be visible in log
+                console.log(`Progress: ${progressInfo.progress} | ${currentCompleted}/${totalTexts} | ${progressInfo.speed} | ${progressInfo.eta}`);
             }
 
             // Save checkpoint periodically
