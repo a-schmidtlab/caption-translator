@@ -9,7 +9,7 @@ dotenv.config({ path: path.join(__dirname, '../.env') });
 
 async function testTranslation() {
     try {
-        const apiUrl = process.env.LIBRETRANSLATE_API_URL || 'http://localhost:5000';
+        const apiUrl = process.env.LIBRETRANSLATE_API_URL || 'http://localhost:5555';
         console.log(`Testing connection to LibreTranslate at: ${apiUrl}`);
 
         // First, test if the server is running by checking the languages endpoint
@@ -48,8 +48,8 @@ async function testTranslation() {
         if (error.message.includes('ECONNREFUSED')) {
             console.error('\nError: Cannot connect to LibreTranslate server. Please make sure:');
             console.error('1. Docker is running');
-            console.error('2. LibreTranslate container is running (docker run -it -p 5000:5000 libretranslate/libretranslate)');
-            console.error('3. Port 5000 is not being used by another application');
+            console.error('2. LibreTranslate container is running (docker run -it -p 5555:5000 libretranslate/libretranslate)');
+            console.error('3. Port 5555 is not being used by another application');
         }
     }
 }

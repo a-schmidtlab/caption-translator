@@ -28,34 +28,30 @@ export async function translateBatch(texts, batchIndex) {
 
     if (uniqueTexts.length === 0) return new Map();
 
+    // Create a persistent HTTP agent for connection pooling
+    const agent = new http.Agent({ 
+        keepAlive: true, 
+        maxSockets: 5,  // Reduced from 10 to 5
+        timeout: 180000 // Increased timeout
+    });
+
     for (let retry = 0; retry < config.MAX_RETRIES; retry++) {
         try {
-            // Split texts into even smaller sub-batches for better parallelization
-            const subBatchSize = Math.max(1, Math.ceil(uniqueTexts.length / 3));  // Split into 3 sub-batches
-            const subBatches = [];
-            for (let i = 0; i < uniqueTexts.length; i += subBatchSize) {
-                subBatches.push(uniqueTexts.slice(i, i + subBatchSize));
-            }
+            // Add initial delay based on batch index to stagger requests
+            await sleep(batchIndex * 200);
 
-            // Create parallel promises for each sub-batch with connection pooling
-            const agent = new http.Agent({ 
-                keepAlive: true, 
-                maxSockets: 10,
-                timeout: 120000
-            });
+            // Process one text at a time for better reliability
+            const results = new Map();
             
-            const subBatchPromises = subBatches.map(async (subBatch, subIndex) => {
-                // Significant stagger between requests
-                await sleep(subIndex * 1000);
-                
+            for (const text of uniqueTexts) {
                 const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 90000);
+                const timeout = setTimeout(() => controller.abort(), 120000); // 2 minute timeout
 
                 try {
                     const response = await fetch(`${apiUrl}/translate`, {
                         method: 'POST',
                         body: JSON.stringify({
-                            q: subBatch,
+                            q: text,
                             source: 'de',
                             target: 'en',
                             format: 'text'
@@ -73,36 +69,35 @@ export async function translateBatch(texts, batchIndex) {
                     }
 
                     const result = await response.json();
-                    return { texts: subBatch, translations: result.translatedText };
+                    results.set(text, result.translatedText);
+
+                    // Add delay between individual texts
+                    await sleep(500);
+
+                } catch (error) {
+                    throw error;
                 } finally {
                     clearTimeout(timeout);
                 }
-            });
+            }
+            
+            return results;
 
-            // Wait for all sub-batches to complete with timeout
-            const results = await Promise.race([
-                Promise.all(subBatchPromises),
-                new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('Translation timeout')), 100000)
-                )
-            ]);
-            
-            // Merge results
-            const translationMap = new Map();
-            results.forEach(result => {
-                result.texts.forEach((text, index) => {
-                    translationMap.set(text, result.translations[index]);
-                });
-            });
-            
-            return translationMap;
         } catch (error) {
             if (retry === config.MAX_RETRIES - 1) {
                 console.error(`Batch ${batchIndex}: Translation failed after ${config.MAX_RETRIES} retries:`, error.message);
                 return new Map(uniqueTexts.map(text => [text, `[TRANSLATION ERROR: ${error.message}]`]));
             }
-            console.log(`Batch ${batchIndex}: Retry ${retry + 1}/${config.MAX_RETRIES} after error:`, error.message);
-            await sleep(config.RETRY_DELAY * Math.pow(2, retry));  // Exponential backoff
+            
+            // Calculate delay with exponential backoff and some randomization
+            const baseDelay = config.RETRY_DELAY * Math.pow(2, retry);
+            const jitter = Math.random() * 1000;
+            const delay = baseDelay + jitter;
+            
+            console.log(`Batch ${batchIndex}: Retry ${retry + 1}/${config.MAX_RETRIES} after error: ${error.message}`);
+            console.log(`Waiting ${Math.round(delay/1000)} seconds before retry...`);
+            
+            await sleep(delay);
         }
     }
 }
