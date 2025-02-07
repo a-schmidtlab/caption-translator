@@ -7,99 +7,141 @@ import fetch from 'node-fetch';
 import http from 'http';
 import { config } from './config.js';
 
+// Create a persistent HTTP agent with conservative settings
+const agent = new http.Agent({
+    keepAlive: true,
+    maxSockets: 3,        // Limit concurrent connections
+    timeout: 60000,       // 1 minute timeout
+    maxFreeSockets: 2,    // Keep fewer idle sockets
+    scheduling: 'fifo'    // Predictable request ordering
+});
+
+// Rate limiter implementation
+class RateLimiter {
+    constructor(maxRequests, timeWindow) {
+        this.maxRequests = maxRequests;
+        this.timeWindow = timeWindow;
+        this.requests = [];
+    }
+
+    async waitForSlot() {
+        const now = Date.now();
+        this.requests = this.requests.filter(time => time > now - this.timeWindow);
+        
+        if (this.requests.length >= this.maxRequests) {
+            const oldestRequest = this.requests[0];
+            const waitTime = (oldestRequest + this.timeWindow) - now;
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            return this.waitForSlot();
+        }
+        
+        this.requests.push(now);
+    }
+}
+
+// Create rate limiter: max 30 requests per 10 seconds
+const rateLimiter = new RateLimiter(30, 10000);
+
 /**
- * Promisified sleep function
- * @param {number} ms - Milliseconds to sleep
- * @returns {Promise} Resolves after specified time
+ * Translates a single text with robust error handling
+ * @param {string} text - Text to translate
+ * @param {number} retryCount - Current retry attempt
+ * @returns {Promise<string>} Translated text
  */
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+async function translateSingle(text, retryCount = 0) {
+    const apiUrl = process.env.LIBRETRANSLATE_API_URL || 'http://localhost:5555';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+
+    try {
+        // Wait for rate limiter
+        await rateLimiter.waitForSlot();
+
+        const response = await fetch(`${apiUrl}/translate`, {
+            method: 'POST',
+            body: JSON.stringify({
+                q: text,
+                source: 'de',
+                target: 'en',
+                format: 'text'
+            }),
+            headers: {
+                'Content-Type': 'application/json',
+                'Connection': 'keep-alive'
+            },
+            agent,
+            signal: controller.signal
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        return result.translatedText;
+    } catch (error) {
+        if (retryCount < config.MAX_RETRIES) {
+            // Calculate delay with exponential backoff and jitter
+            const baseDelay = config.RETRY_DELAY * Math.pow(1.5, retryCount);
+            const jitter = Math.random() * 1000;
+            const delay = baseDelay + jitter;
+            
+            console.log(`Translation failed (attempt ${retryCount + 1}/${config.MAX_RETRIES}). Retrying in ${Math.round(delay)}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            
+            return translateSingle(text, retryCount + 1);
+        }
+        throw new Error(`Translation failed after ${config.MAX_RETRIES} retries: ${error.message}`);
+    } finally {
+        clearTimeout(timeout);
+    }
 }
 
 /**
- * Translates a batch of texts with retry mechanism
+ * Translates a batch of texts with improved error handling
  * @param {Array<string>} texts - Texts to translate
  * @param {number} batchIndex - Index of the current batch
  * @returns {Map} Map of original to translated texts
  */
 export async function translateBatch(texts, batchIndex) {
-    const apiUrl = process.env.LIBRETRANSLATE_API_URL || 'http://localhost:5555';
     const uniqueTexts = [...new Set(texts.filter(text => text))];
-
     if (uniqueTexts.length === 0) return new Map();
 
-    // Create a persistent HTTP agent for connection pooling
-    const agent = new http.Agent({ 
-        keepAlive: true, 
-        maxSockets: 5,  // Reduced from 10 to 5
-        timeout: 180000 // Increased timeout
-    });
+    const results = new Map();
+    const failedTexts = [];
 
-    for (let retry = 0; retry < config.MAX_RETRIES; retry++) {
+    // Process texts sequentially with controlled delays
+    for (let i = 0; i < uniqueTexts.length; i++) {
+        const text = uniqueTexts[i];
+        
         try {
-            // Add initial delay based on batch index to stagger requests
-            await sleep(batchIndex * 200);
+            // Add delay based on position in batch
+            const delay = i * 200; // 200ms between texts
+            await new Promise(resolve => setTimeout(resolve, delay));
 
-            // Process one text at a time for better reliability
-            const results = new Map();
-            
-            for (const text of uniqueTexts) {
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 120000); // 2 minute timeout
+            const translation = await translateSingle(text);
+            results.set(text, translation);
 
-                try {
-                    const response = await fetch(`${apiUrl}/translate`, {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            q: text,
-                            source: 'de',
-                            target: 'en',
-                            format: 'text'
-                        }),
-                        headers: { 
-                            'Content-Type': 'application/json',
-                            'Connection': 'keep-alive'
-                        },
-                        agent,
-                        signal: controller.signal
-                    });
-
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-
-                    const result = await response.json();
-                    results.set(text, result.translatedText);
-
-                    // Add delay between individual texts
-                    await sleep(500);
-
-                } catch (error) {
-                    throw error;
-                } finally {
-                    clearTimeout(timeout);
-                }
-            }
-            
-            return results;
-
+            // Log progress
+            console.log(`Batch ${batchIndex}: ${i + 1}/${uniqueTexts.length} texts completed`);
         } catch (error) {
-            if (retry === config.MAX_RETRIES - 1) {
-                console.error(`Batch ${batchIndex}: Translation failed after ${config.MAX_RETRIES} retries:`, error.message);
-                return new Map(uniqueTexts.map(text => [text, `[TRANSLATION ERROR: ${error.message}]`]));
-            }
+            console.error(`Failed to translate text in batch ${batchIndex}:`, error.message);
+            failedTexts.push(text);
             
-            // Calculate delay with exponential backoff and some randomization
-            const baseDelay = config.RETRY_DELAY * Math.pow(2, retry);
-            const jitter = Math.random() * 1000;
-            const delay = baseDelay + jitter;
-            
-            console.log(`Batch ${batchIndex}: Retry ${retry + 1}/${config.MAX_RETRIES} after error: ${error.message}`);
-            console.log(`Waiting ${Math.round(delay/1000)} seconds before retry...`);
-            
-            await sleep(delay);
+            // Add longer delay after failure
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
     }
+
+    // Handle failed texts
+    if (failedTexts.length > 0) {
+        console.log(`Batch ${batchIndex}: ${failedTexts.length} texts failed, marking as failed`);
+        for (const text of failedTexts) {
+            results.set(text, `[TRANSLATION FAILED]`);
+        }
+    }
+
+    return results;
 }
 
 /**
@@ -108,7 +150,6 @@ export async function translateBatch(texts, batchIndex) {
  * @returns {Array<Array<string>>} Grouped texts
  */
 export function groupTextsByLength(texts) {
-    // Sort texts by length
     const sortedTexts = [...texts].sort((a, b) => a.length - b.length);
     const groups = [];
     let currentGroup = [];

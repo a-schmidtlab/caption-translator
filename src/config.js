@@ -1,6 +1,6 @@
 /**
  * Configuration module for the Excel Translation Tool
- * Contains all configuration settings and system-specific optimizations
+ * Contains all configurable parameters
  */
 
 import os from 'os';
@@ -10,16 +10,16 @@ import os from 'os';
  * These values are optimized for reliability and performance
  */
 const DEFAULT_CONFIG = {
-    BATCH_SIZE: 3,                // Very conservative batch size
-    PARALLEL_BATCHES: 20,         // Minimal parallel processing
-    MAX_RETRIES: 5,              // More retries for reliability
-    RETRY_DELAY: 1000,           // Long delay between retries
-    BATCH_DELAY: 500,            // Significant delay between batches
-    CHUNK_SIZE: 50,              // Small chunk size
-    MAX_TEXT_LENGTH: 5000,       // Maximum length for a single text
-    CHECKPOINT_INTERVAL: 100,    // Frequent checkpoints
-    MAX_MEMORY_USAGE: 0.95,      // Higher memory usage for better performance
-    SAVE_INTERVAL: 1000          // Frequent saves
+    BATCH_SIZE: 5,                // Balanced batch size
+    PARALLEL_BATCHES: 15,         // Moderate parallel processing
+    MAX_RETRIES: 3,              // Keep retries focused
+    RETRY_DELAY: 1000,           // Moderate delay between retries
+    BATCH_DELAY: 500,            // Reduced delay between batches
+    CHUNK_SIZE: 50,              // Moderate chunk size
+    MAX_TEXT_LENGTH: 5000,       // Keep max text length
+    CHECKPOINT_INTERVAL: 100,     // Regular checkpoints
+    MAX_MEMORY_USAGE: 0.90,      // Keep memory threshold
+    SAVE_INTERVAL: 1000          // Regular saves
 };
 
 /**
@@ -49,40 +49,23 @@ export const COLUMNS_TO_IGNORE = [
  * Calculates optimal configuration based on system resources
  * @returns {Object} Optimized configuration object
  */
-export function calculateOptimalConfig() {
+function calculateOptimalConfig() {
     const cpuCount = os.cpus().length;
-    const totalMemory = os.totalmem();
-    const freeMemory = os.freemem();
+    const totalMemoryGB = os.totalmem() / (1024 * 1024 * 1024);
     
-    // Calculate optimal values based on system resources
-    const config = { ...DEFAULT_CONFIG };
-    
-    // Optimize specifically for 12-core system
-    if (cpuCount === 12) {
-        config.PARALLEL_BATCHES = 20;     // Very conservative parallel processing
-        config.BATCH_SIZE = 3;            // Very conservative batch size
-        config.CHUNK_SIZE = 50;           // Small chunk size
-        config.BATCH_DELAY = 500;         // Significant delay for stability
-        config.CHECKPOINT_INTERVAL = 100;  // Frequent I/O operations
-        config.SAVE_INTERVAL = 1000;      // Frequent I/O operations
-        config.RETRY_DELAY = 1000;        // Long retry delay
-    } else {
-        // Fallback for other systems
-        config.PARALLEL_BATCHES = Math.max(Math.floor(cpuCount * 2), 4);
-        config.BATCH_SIZE = Math.floor(50 / (config.PARALLEL_BATCHES / 8));
-        config.CHUNK_SIZE = config.BATCH_SIZE * 4;
-    }
-    
-    // Memory-based adjustments
-    const memoryRatio = freeMemory / totalMemory;
-    if (memoryRatio > 0.4) {  // If we have plenty of memory, be slightly more aggressive
-        config.PARALLEL_BATCHES = Math.floor(config.PARALLEL_BATCHES * 1.2);
-        config.CHUNK_SIZE = Math.floor(config.CHUNK_SIZE * 1.1);
-    }
-    
-    console.log(`[Config] CPU:${cpuCount} | Batches:${config.PARALLEL_BATCHES} | Size:${config.BATCH_SIZE} | Mem:${(memoryRatio * 100).toFixed(1)}%`);
-    
-    return config;
+    // Conservative settings prioritizing stability
+    return {
+        BATCH_SIZE: 3,                    // Process 3 texts at a time
+        PARALLEL_BATCHES: Math.min(5, Math.floor(cpuCount / 2)),  // Use half of CPU cores
+        MAX_RETRIES: 3,                   // Maximum retry attempts
+        RETRY_DELAY: 2000,                // Base delay between retries (ms)
+        BATCH_DELAY: 1000,                // Delay between batches (ms)
+        CHUNK_SIZE: 25,                   // Number of texts per chunk
+        MAX_TEXT_LENGTH: 5000,            // Maximum combined text length per batch
+        CHECKPOINT_INTERVAL: 50,          // Save progress every 50 texts
+        MAX_MEMORY_USAGE: 0.85,           // Maximum memory usage (85%)
+        SAVE_INTERVAL: 60000,             // Save every minute
+    };
 }
 
 export const config = calculateOptimalConfig(); 

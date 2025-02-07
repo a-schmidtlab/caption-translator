@@ -22,6 +22,7 @@ import cliProgress from 'cli-progress';
 import fs from 'fs/promises';
 import os from 'os';
 import http from 'http';
+import ProgressMonitor from './progress.js';
 
 import { config } from './config.js';
 import { translateBatch, groupTextsByLength } from './translator.js';
@@ -32,6 +33,15 @@ import { formatProgress, checkMemory, sleep, formatTimeRemaining } from './utils
 // Load environment variables
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
+
+// Global state for graceful shutdown
+let isShuttingDown = false;
+
+// Setup signal handlers for graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\nGraceful shutdown initiated...');
+    isShuttingDown = true;
+});
 
 /**
  * Main function to process Excel file
@@ -65,6 +75,8 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
 
         const startTime = Date.now();
         let lastMemoryCheck = Date.now();
+        let lastSaveTime = Date.now();
+        let consecutiveErrors = 0;
         
         // Initialize translation cache with existing translations
         const translationCache = new Map();
@@ -92,6 +104,9 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
         
         const totalTexts = translationCache.size;
         const remainingTexts = uniqueTexts.length;
+
+        // Initialize progress monitor
+        const progressMonitor = new ProgressMonitor(totalTexts, completedTranslations);
         
         console.log(`Translation Progress:
 - Total Unique Texts: ${totalTexts}
@@ -121,124 +136,134 @@ async function processExcelFile(inputPath, testMode = false, dryRun = false) {
 
         console.log(`\nContinuing translation for remaining ${remainingTexts} texts...\n`);
 
-        // Initialize progress tracking
-        const progressBar = new cliProgress.SingleBar({
-            format: 'Progress: {percentage}% | {value}/{total} lines completed',
-            barCompleteChar: '=',
-            barIncompleteChar: ' ',
-            hideCursor: true,
-            clearOnComplete: false,
-            stopOnComplete: true,
-            forceRedraw: true
-        });
-
-        progressBar.start(totalTexts, completedTranslations);
-
         // Group texts by length for optimal processing
         const textGroups = groupTextsByLength(uniqueTexts);
         console.log(`\nStarting translation of remaining ${remainingTexts} texts...\n`);
 
-        // Process groups in parallel batches
-        let processedRows = completedTranslations;
-        const batchGroups = [];
-        
-        // Pre-group all batches for better distribution
-        for (let i = 0; i < textGroups.length; i += config.PARALLEL_BATCHES) {
-            const group = [];
-            for (let j = 0; j < config.PARALLEL_BATCHES && (i + j) < textGroups.length; j++) {
-                group.push(textGroups[i + j]);
-            }
-            batchGroups.push(group);
-        }
-        
-        // Process batch groups
-        for (let groupIndex = 0; groupIndex < batchGroups.length; groupIndex++) {
-            const group = batchGroups[groupIndex];
+        // Process groups sequentially with robust error handling
+        for (let i = 0; i < textGroups.length && !isShuttingDown; i++) {
+            const batch = textGroups[i];
             
-            // Check memory usage every 30 seconds
-            if (Date.now() - lastMemoryCheck > 30000) {
-                checkMemory();
-                lastMemoryCheck = Date.now();
-            }
-            
-            const batchPromises = group.map((batch, index) => 
-                translateBatch(batch, groupIndex * config.PARALLEL_BATCHES + index)
-            );
+            try {
+                // Check memory usage periodically
+                if (Date.now() - lastMemoryCheck > 30000) {
+                    checkMemory();
+                    lastMemoryCheck = Date.now();
+                }
 
-            // Wait for all parallel batches to complete
-            const batchResults = await Promise.all(batchPromises);
-            
-            // Clear batch promises to help garbage collection
-            batchPromises.length = 0;
-            
-            // Merge results into the translation cache with memory optimization
-            for (const translationMap of batchResults) {
-                for (const [original, translated] of translationMap.entries()) {
+                // Translate batch
+                const batchTranslations = await translateBatch(batch, i);
+                
+                // Update translations map
+                for (const [original, translated] of batchTranslations) {
                     translationCache.set(original, translated);
                 }
-                // Clear reference to help garbage collection
-                translationMap.clear();
-            }
-            
-            // Clear batch results to help garbage collection
-            batchResults.length = 0;
-            
-            // Update progress
-            const progress = completedTranslations + Math.min((groupIndex + 1) * config.PARALLEL_BATCHES, textGroups.length);
-            
-            // Update progress bar
-            progressBar.update(progress);
-            
-            // Save checkpoint periodically
-            if (progress % config.CHECKPOINT_INTERVAL === 0) {
+
+                // Update progress
+                const status = progressMonitor.updateProgress(translationCache.size);
+                console.log(progressMonitor.formatProgressMessage(status));
+
+                // Check for stalls
+                if (status.isStalled) {
+                    console.error('\nWARNING: Translation progress appears to be stalled!');
+                    console.error('Consider checking the LibreTranslate service or network connection.');
+                    
+                    // If stalled for too long, exit
+                    if (status.timeSinceLastProgress > 15 * 60) { // 15 minutes
+                        throw new Error('Translation stalled for too long, exiting...');
+                    }
+                }
+
+                // Reset consecutive errors counter on success
+                consecutiveErrors = 0;
+
+                // Save progress periodically
+                if (Date.now() - lastSaveTime > config.SAVE_INTERVAL) {
+                    await saveCheckpoint(checkpointPath, {
+                        processedRows: translationCache.size,
+                        translations: Object.fromEntries(translationCache),
+                        lastProcessedFile: resolvedInputPath,
+                        totalRows: totalTexts
+                    });
+                    lastSaveTime = Date.now();
+                }
+
+                // Add delay between batches
+                await sleep(config.BATCH_DELAY);
+            } catch (error) {
+                console.error(`\nError processing batch ${i}:`, error.message);
+                
+                // Track consecutive errors
+                consecutiveErrors++;
+                
+                // If too many consecutive errors, exit
+                if (consecutiveErrors >= 5) {
+                    console.error('Too many consecutive errors, exiting...');
+                    break;
+                }
+
+                // Save progress before continuing
                 await saveCheckpoint(checkpointPath, {
-                    processedRows: progress,
+                    processedRows: translationCache.size,
                     translations: Object.fromEntries(translationCache),
                     lastProcessedFile: resolvedInputPath,
                     totalRows: totalTexts
                 });
-                console.log(`\nCheckpoint saved at ${progress}/${totalTexts} (${Math.floor((progress/totalTexts)*100)}%)`);
+                
+                // Add longer delay after error
+                await sleep(5000);
             }
-
-            await sleep(config.BATCH_DELAY);
         }
 
-        // Stop and clean up the progress bar
-        progressBar.stop();
-        console.log('\nTranslation completed!');
+        // Final save
+        await saveCheckpoint(checkpointPath, {
+            processedRows: translationCache.size,
+            translations: Object.fromEntries(translationCache),
+            lastProcessedFile: resolvedInputPath,
+            totalRows: totalTexts
+        });
 
-        // Apply final translations to all rows
-        console.log('\nApplying final translations to Excel file...');
+        // Apply translations to Excel file
+        console.log('\nApplying translations to Excel file...');
         for (const row of jsonData) {
             for (const germanCol of germanColumns) {
                 if (row[germanCol]) {
                     const englishCol = germanCol.replace('_DE', '_EN');
-                    row[englishCol] = translationCache.get(row[germanCol]) || '';
+                    const translation = translationCache.get(row[germanCol]);
+                    if (translation && translation !== '[TRANSLATION FAILED]') {
+                        row[englishCol] = translation;
+                    }
                 }
             }
         }
 
-        // Save final result
-        await saveToExcel(jsonData, resolvedInputPath, true);
+        // Save updated Excel file
+        const outputPath = resolvedInputPath.replace('.xlsx', '_translated.xlsx');
+        await saveToExcel(jsonData, outputPath);
+
+        console.log('\nTranslation process completed:');
+        console.log(`- Total texts: ${totalTexts}`);
+        console.log(`- Successfully translated: ${translationCache.size}`);
+        console.log(`- Failed translations: ${totalTexts - translationCache.size}`);
+        console.log(`- Output saved to: ${outputPath}`);
 
     } catch (error) {
-        console.error('Error processing Excel file:', error.message);
-        process.exit(1);
+        console.error('Fatal error:', error);
+        throw error;
     }
 }
 
-// Get input file from command line arguments
+// Start processing if file argument provided
 const inputFile = process.argv[2];
-const testMode = process.argv.includes('--test');
-const dryRun = process.argv.includes('--dry-run');
-
 if (!inputFile) {
     console.error('Please provide an input Excel file path');
-    console.log('Usage: npm start <excel-file-path> [--test] [--dry-run]');
-    console.log('Options:');
-    console.log('  --test     Process only first 10 rows (test mode)');
-    console.log('  --dry-run  Estimate processing time without translating');
     process.exit(1);
 }
 
-processExcelFile(inputFile, testMode, dryRun); 
+const testMode = process.argv.includes('--test');
+const dryRun = process.argv.includes('--dry-run');
+
+processExcelFile(inputFile, testMode, dryRun).catch(error => {
+    console.error('Fatal error:', error);
+    process.exit(1);
+}); 
